@@ -8,39 +8,50 @@ from incident_agent.agent.graph import IncidentAgent
 from incident_agent.api.routes import router as infrastructure_router
 from incident_agent.api.incident_routes import router as incident_router
 from incident_agent.api.middleware import IncidentPayloadLimitMiddleware
+from incident_agent.api.retrieval_routes import router as retrieval_router
 from incident_agent.api.schemas import HealthResponse
 from incident_agent.models import IncidentRequest, IncidentResult
 from incident_agent.simulator.environment import LocalInfrastructure
 from incident_agent.incidents.registry import IncidentRegistry
 from incident_agent.storage.database import DEFAULT_DATABASE_URL, Database
+from incident_agent.retrieval.engine import HybridRetriever, RetrievalEngine
 
 
-def create_app(infrastructure: LocalInfrastructure | None = None, *, database_url: str | None = None) -> FastAPI:
+def create_app(
+    infrastructure: LocalInfrastructure | None = None,
+    *, database_url: str | None = None,
+    retrieval_engine: RetrievalEngine | None = None,
+) -> FastAPI:
     """Build an application with one shared simulator for its full lifecycle."""
     manager = infrastructure or LocalInfrastructure()
     database = Database(database_url or DEFAULT_DATABASE_URL)
+    retrieval = retrieval_engine or RetrievalEngine()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        database.initialize()
         try:
+            database.initialize()
+            retrieval.initialize()
             yield
         finally:
+            retrieval.close()
             database.close()
 
     application = FastAPI(
         title="Safe IT-Ops Incident Agent",
         version="0.2.0",
-        description="Read-only, versioned inspection of deterministic simulated infrastructure.",
+        description="Local simulated infrastructure, incident management and operational knowledge retrieval.",
         lifespan=lifespan,
     )
     application.add_middleware(IncidentPayloadLimitMiddleware, max_bytes=64_000)
     application.state.infrastructure = manager
     application.state.database = database
-    application.state.agent = IncidentAgent(infrastructure=manager)
+    application.state.retrieval_engine = retrieval
+    application.state.agent = IncidentAgent(infrastructure=manager, retriever=HybridRetriever(retrieval))
     application.state.incident_registry = IncidentRegistry(manager, database=database)
     application.include_router(infrastructure_router)
     application.include_router(incident_router)
+    application.include_router(retrieval_router)
 
     @application.get("/health", response_model=HealthResponse, tags=["Health"])
     def health(response: Response) -> HealthResponse:

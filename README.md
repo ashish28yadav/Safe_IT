@@ -36,7 +36,7 @@ Proposed simulator actions require explicit approval by default (`approved: true
 
 ## Local retrieval
 
-Runbooks are held in source and indexed in an ephemeral local Chroma collection with BM25 lexical retrieval. A stable local hashing embedder is the default and requires no network access. To use Sentence Transformers, provide model files locally and set `USE_LOCAL_SENTENCE_TRANSFORMER=true` and `EMBEDDING_MODEL_PATH` to that directory; the model is loaded in local-files-only mode.
+The persistent RAG subsystem indexes the tracked `knowledge_base/` directory with structure-aware or fixed-size chunks. ChromaDB stores vectors and `rank_bm25` stores a durable chunk mapping and rebuildable BM25 index metadata. BM25 and vector retrieval share stable chunk IDs; hybrid search uses reciprocal rank fusion. The default `local-hash-v1` embedder is deterministic and offline. BGE and MiniLM support requires a local model directory; the model is loaded lazily in local-only CPU mode and is never downloaded by application startup.
 
 ## Docker and persistent local storage
 
@@ -179,3 +179,85 @@ uv run alembic current
 ```
 
 The app also applies pending migrations on startup. To use an alternate local file, set `INCIDENT_AGENT_DATABASE_URL` before starting the app. Tests configure isolated SQLite files under pytest temporary directories and never use the development database.
+
+## Phase 5: Operational knowledge retrieval
+
+### Architecture and corpus
+
+`incident_agent.retrieval.documents` loads Markdown, TXT, and PDF (PyMuPDF) documents, normalizes metadata and text, and produces either heading-aware chunks or fixed word windows with configurable overlap. Malformed/empty documents are reported by filename in application logs and in the local rebuild response. Chunk identifiers are stable for the same document, chunking strategy, order, and content. Each chunk preserves document ID, chunk ID, title, relative source name, service, category, document type, section, and a SHA-256 content hash.
+
+The tracked [`knowledge_base/`](knowledge_base/) contains 31 operational runbooks and synthetic incident examples for payment, authentication, notification, PostgreSQL, and cross-service failure classes. Historical examples say “Synthetic example only” and do not describe real customer events. Runbooks require operator review and authorization before state changes; no document automatically authorizes a destructive action.
+
+At startup, one lifecycle-scoped `RetrievalEngine` indexes the corpus. Chroma persists vectors below `./data/chroma`; BM25 chunk mappings and metadata are stored below `./data/bm25`. In Docker these resolve to `/app/data/chroma` and `/app/data/bm25` within the existing named `incident_data` volume, separate from `/app/data/incidents.db`. Re-indexing is idempotent and removes stale chunk IDs. Collection metadata records the embedding model identity; reusing a collection with a different model fails closed.
+
+### Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `KNOWLEDGE_BASE_DIR` | `./knowledge_base` | Source documents |
+| `RETRIEVAL_VECTOR_DIR` | `./data/chroma` | Persistent Chroma directory |
+| `RETRIEVAL_BM25_DIR` | `./data/bm25` | Persistent BM25 metadata |
+| `RETRIEVAL_COLLECTION_NAME` | `operational_knowledge` | Chroma collection |
+| `RETRIEVAL_EMBEDDING_MODEL` | `local-hash-v1` | `local-hash-v1`, `BAAI/bge-small-en-v1.5`, or `sentence-transformers/all-MiniLM-L6-v2` |
+| `RETRIEVAL_EMBEDDING_MODEL_PATH` | unset | Local transformer model directory; required for transformer modes |
+| `RETRIEVAL_CHUNK_SIZE` / `RETRIEVAL_CHUNK_OVERLAP` | `220` / `40` | Word window and overlap |
+| `RETRIEVAL_CHUNKING_STRATEGY` | `structure` | `structure` or `fixed` |
+| `RETRIEVAL_RRF_CONSTANT` | `60` | Reciprocal-rank fusion constant |
+| `APP_ENV` | `production` | Rebuild route is enabled only for explicit `development` or `local` |
+
+For a local deterministic setup:
+
+```powershell
+uv sync --group dev
+uv run python main.py
+```
+
+To enable the local-only index rebuild route, explicitly set `$env:APP_ENV = "development"` before starting the API. For a transformer, set `RETRIEVAL_EMBEDDING_MODEL` to one of the supported identities and `RETRIEVAL_EMBEDDING_MODEL_PATH` to an already-present local model folder. No model is fetched automatically. Transformer inference runs on CPU; use the hashing default on memory-constrained hosts.
+
+Download model files explicitly into local ignored storage when you want to evaluate them (these commands are not run by the app):
+
+```powershell
+uv run hf download sentence-transformers/all-MiniLM-L6-v2 --local-dir .\models\all-MiniLM-L6-v2
+uv run hf download BAAI/bge-small-en-v1.5 --local-dir .\models\bge-small-en-v1.5
+$env:EVAL_MINILM_MODEL_PATH = (Resolve-Path .\models\all-MiniLM-L6-v2).Path
+$env:EVAL_BGE_MODEL_PATH = (Resolve-Path .\models\bge-small-en-v1.5).Path
+```
+
+The evaluator reads exactly `EVAL_MINILM_MODEL_PATH` and `EVAL_BGE_MODEL_PATH`. Each Chroma collection stores its `RETRIEVAL_EMBEDDING_MODEL` identity and rejects reuse with an incompatible embedding model. If downloading is not desired, point these variables to existing local directories. For Docker, mount a host model folder with `RETRIEVAL_MODEL_HOST_DIR` and set `RETRIEVAL_EMBEDDING_MODEL_PATH` to its `/app/models/...` path.
+
+### Retrieval API
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/v1/retrieval/search` | Search with `bm25`, `vector`, or `hybrid`; optional service/category/document type filters |
+| GET | `/api/v1/retrieval/health` | Index readiness and document/chunk counts; no storage paths are returned |
+| POST | `/api/v1/retrieval/index/rebuild` | Rebuild indexes in explicit `APP_ENV=development` or `local` only (HTTP 403 otherwise) |
+
+Example:
+
+```powershell
+$body = @{
+  query = "PostgreSQL connection pool exhaustion and payment timeouts"
+  top_k = 5
+  strategy = "hybrid"
+  service = "postgres-database"
+  category = "database"
+  document_type = "runbook"
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/retrieval/search `
+  -ContentType "application/json" -Body $body
+```
+
+The response includes BM25 and vector candidate rankings plus the RRF fused results. BM25 scores are returned only for BM25 candidates; vector hits do not receive a fabricated relevance score. Results preserve the source and chunk metadata. Request sizes are bounded by Pydantic validation (`query` max 2,000 characters, `top_k` 1–50, and optional `candidate_count` 1–100).
+
+### Evaluation
+
+Thirty manually reviewed queries and relevant operational document IDs are in `src/incident_agent/evaluation/retrieval_queries.json`. Run:
+
+```powershell
+uv run python -m incident_agent.evaluation.retrieval
+```
+
+The harness evaluates E1 BM25, E2 MiniLM vectors, E3 BGE vectors, E4 BM25+MiniLM, and E5 BM25+BGE with both chunking strategies. It writes `evaluation/retrieval/results.json`, `results.csv`, and `report.md`. The evaluator collapses chunk hits into a stable document ranking before calculating all metrics. Recall@1/3/5 is the macro-average per query of relevant documents found in the top K divided by that query’s relevant document count. MRR is the macro-average reciprocal rank of the first relevant document. Since some queries have multiple relevant documents, MRR can be 1.0 while Recall@1 is below 1.0 when the first result is relevant but other relevant documents rank later. Indexing time forces a full rebuild; mean/p95 query latency is measured at run time. Transformer cases are marked `not_run` unless their local model paths are configured; the harness never downloads weights. Scores are not inferred for skipped cases.
+
+Docker Compose defaults `APP_ENV` to `production`, keeps Chroma and BM25 below the existing `/app/data` named volume, and disables API-triggered rebuilds. The container health check verifies both API/storage and retrieval-index readiness. Swagger UI documents all routes at `/docs`. PDF loading requires the locked PyMuPDF dependency. There is no external LLM call, live monitoring integration, production infrastructure connection, or automatic remediation in this phase.
