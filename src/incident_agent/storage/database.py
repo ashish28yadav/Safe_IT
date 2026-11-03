@@ -9,6 +9,7 @@ from threading import RLock
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -61,6 +62,15 @@ class Database:
         """Create a session after ensuring the schema is initialized."""
         self.initialize()
         return self.session_factory()
+
+    def check_ready(self) -> bool:
+        """Confirm migrations are applied and the local database accepts queries."""
+        try:
+            self.initialize()
+            with self.engine.connect() as connection:
+                return connection.exec_driver_sql("SELECT 1").scalar_one() == 1
+        except SQLAlchemyError:
+            return False
 
     def close(self) -> None:
         """Release pooled connections during application shutdown."""

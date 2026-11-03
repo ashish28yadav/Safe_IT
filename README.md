@@ -38,14 +38,25 @@ Proposed simulator actions require explicit approval by default (`approved: true
 
 Runbooks are held in source and indexed in an ephemeral local Chroma collection with BM25 lexical retrieval. A stable local hashing embedder is the default and requires no network access. To use Sentence Transformers, provide model files locally and set `USE_LOCAL_SENTENCE_TRANSFORMER=true` and `EMBEDDING_MODEL_PATH` to that directory; the model is loaded in local-files-only mode.
 
-## Docker
+## Docker and persistent local storage
 
-```sh
-docker build -t safe-it-ops-agent .
-docker run --rm -p 8000:8000 safe-it-ops-agent
+Docker Compose runs the API as a non-root user and mounts the named `incident_data` volume at `/app/data`. SQLite is stored at `/app/data/incidents.db`; only the HTTP API is published, on loopback at `127.0.0.1:8000` by default. The SQLite file is never exposed as a network service. The container health check verifies `/health`, which reports unhealthy if simulator or database readiness fails. FastAPI applies Alembic migrations before serving requests and closes SQLAlchemy connections during graceful shutdown.
+
+```powershell
+docker compose up --build -d
+docker compose ps
+Invoke-RestMethod http://127.0.0.1:8000/health
 ```
 
-All simulator mutations remain in process memory. Never add production infrastructure adapters or credentials to this prototype.
+Change the host-side API port only when needed by setting `APP_PORT` (for example, `$env:APP_PORT = "8080"` before `docker compose up --build -d`). The container continues to listen on port 8000. To recreate the application container while preserving its database volume:
+
+```powershell
+docker compose stop incident-agent
+docker compose rm -f incident-agent
+docker compose up -d --build incident-agent
+```
+
+Do not remove the named volume when recreating the container. For local development outside Docker, `INCIDENT_AGENT_DATABASE_URL` defaults to `sqlite:///./data/incidents.db`. All infrastructure simulations remain in process; no production infrastructure adapters or credentials are used.
 
 ## Infrastructure simulator
 

@@ -1,0 +1,21 @@
+services:
+  incident-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    environment:
+      INCIDENT_AGENT_DATABASE_URL: sqlite:////app/data/incidents.db
+    volumes:
+      - incident_data:/app/data
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 40s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  incident_data:

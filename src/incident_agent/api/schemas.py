@@ -15,6 +15,7 @@ class ServiceStatusResponse(StrEnum):
 class HealthResponse(BaseModel):
     status: str
     simulator_ready: bool
+    storage_ready: bool
     registered_services: int
     mode: str
 

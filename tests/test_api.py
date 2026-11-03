@@ -6,16 +6,18 @@ from incident_agent.simulator.environment import InfrastructureManager
 
 
 @pytest.fixture
-def setup_api() -> tuple[InfrastructureManager, TestClient]:
+def setup_api(tmp_path):
     manager = InfrastructureManager()
-    return manager, TestClient(create_app(manager))
+    database_url = f"sqlite:///{(tmp_path / 'api.db').as_posix()}"
+    with TestClient(create_app(manager, database_url=database_url)) as client:
+        yield manager, client
 
 
 def test_health_and_service_listing(setup_api: tuple[InfrastructureManager, TestClient]) -> None:
     _, client = setup_api
     health = client.get("/health")
     assert health.status_code == 200
-    assert health.json() == {"status": "ok", "simulator_ready": True,
+    assert health.json() == {"status": "ok", "simulator_ready": True, "storage_ready": True,
                              "registered_services": 4, "mode": "local_simulation"}
     services = client.get("/api/v1/services")
     assert services.status_code == 200

@@ -2,7 +2,7 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 
 from incident_agent.agent.graph import IncidentAgent
 from incident_agent.api.routes import router as infrastructure_router
@@ -43,9 +43,15 @@ def create_app(infrastructure: LocalInfrastructure | None = None, *, database_ur
     application.include_router(incident_router)
 
     @application.get("/health", response_model=HealthResponse, tags=["Health"])
-    def health() -> HealthResponse:
+    def health(response: Response) -> HealthResponse:
         service_count = len(manager.list_services())
-        return HealthResponse(status="ok", simulator_ready=service_count > 0,
+        simulator_ready = service_count > 0
+        storage_ready = database.check_ready()
+        ready = simulator_ready and storage_ready
+        if not ready:
+            response.status_code = 503
+        return HealthResponse(status="ok" if ready else "not_ready",
+                              simulator_ready=simulator_ready, storage_ready=storage_ready,
                               registered_services=service_count, mode="local_simulation")
 
     # Compatibility endpoints retained for existing clients.
