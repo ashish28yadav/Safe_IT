@@ -7,6 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY src ./src
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 COPY main.py ./main.py
 RUN pip install --no-cache-dir uv && uv sync --no-dev
 EXPOSE 8000

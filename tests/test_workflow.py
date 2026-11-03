@@ -1,11 +1,12 @@
 from fastapi.testclient import TestClient
 
-from incident_agent.api.app import app, infrastructure
+from incident_agent.api.app import app, create_app, infrastructure
 
 
-def test_investigation_retrieves_runbook_and_requires_approval() -> None:
+def test_investigation_retrieves_runbook_and_requires_approval(tmp_path) -> None:
     infrastructure.reset()
-    response = TestClient(app).post(
+    test_app = create_app(infrastructure, database_url=f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}")
+    response = TestClient(test_app).post(
         "/incidents/investigate",
         json={
             "title": "Payment provider errors",
