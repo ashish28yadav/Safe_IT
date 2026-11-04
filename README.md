@@ -78,6 +78,69 @@ print(infra.verify_recovery("payment-service"))  # True
 
 Run simulator and application tests with `uv run pytest`.
 
+## Phase 6: Evidence-based incident investigations
+
+The Phase 6 investigator is a separate finite LangGraph workflow over an existing persisted incident. It does not replace the compatibility endpoint `/incidents/investigate` or the safety-policy workflow. The new `/api/v1/investigations` API investigates the incident registry record and returns a persisted report.
+
+### Graph and evidence model
+
+`incident_agent.agent.investigation` owns a JSON-serializable `InvestigationState`, focused graph nodes, an optional OpenAI-compatible provider, and a narrow simulator tool adapter. The graph validates the incident, classifies symptoms, queries the existing hybrid retriever, inspects service health/metrics/logs, records dependency modeling gaps, correlates observations with cited knowledge chunks, ranks evidence-linked hypotheses, assesses missing evidence, and produces a structured report. Retrieved runbooks are reference information; they are never treated as proof of current conditions.
+
+The graph has a 12-step limit, 18 LangGraph recursion limit, 90-second execution deadline, zero automatic node retries, one report-generation pass, and bounded LLM request timeout. The current simulator does not expose dependency topology, so dependency observations explicitly say `not_modelled`. Cancellation is cooperative at node boundaries. The API executes a run synchronously and returns only after the run finishes; it does not claim background execution.
+
+Run one API process per simulator instance. The simulator and active cancellation registry are process-local; multiple Uvicorn workers would maintain different simulated states and cannot cancel work running in another worker. Interrupted persistent investigation rows are detected at startup and marked failed.
+
+Allowed simulator inspections are `read_status`, `telemetry`, `query_metrics`, and bounded `search_logs`. The adapter exposes no restart, fault-clear, failure-injection, shell, SQL, or configuration operations. The investigator does not change incident lifecycle state. Incident descriptions, metadata, retrieved text, and logs are untrusted data. The optional LLM receives the incident fields as data and is instructed not to follow embedded instructions. Model suggestions are unverified and cannot become confirmed hypotheses without direct simulator evidence.
+
+Each infrastructure observation has an `obs-...` identifier, service, type, timestamp when available, and a source method. Retrieved sources retain the real `document_id`, `chunk_id`, title, section, source, strategy, and rank. Hypotheses cite evidence IDs and use qualitative `low`, `moderate`, or `high` confidence; these labels are not calibrated probabilities. The report separates simulator facts, retrieved reference chunks, inferred hypotheses, and recommendations.
+
+### Optional OpenAI-compatible model
+
+Rule-based classification and evidence analysis run locally and deterministically by default. They are not represented as an LLM investigation. To request model-assisted analysis, set all of these values in the process environment (or an ignored local `.env` file used by Compose):
+
+| Variable | Purpose |
+| --- | --- |
+| `INVESTIGATION_LLM_BASE_URL` | OpenAI-compatible API root, for example the provider's `/v1` endpoint |
+| `INVESTIGATION_LLM_API_KEY` | Provider credential, supplied at runtime only |
+| `INVESTIGATION_LLM_MODEL` | Provider model identifier |
+| `INVESTIGATION_LLM_TIMEOUT_SECONDS` | Request timeout from 1 to 60 seconds; default 12 |
+
+The service does not contain a default endpoint, key, or model name. No model is downloaded and no API call is made at startup. `use_llm: true` returns HTTP 503 with a configuration error if settings are absent or incomplete. Requests are made only for investigations that opt in. The provider receives only an allowlisted incident summary and metric fields; metadata is excluded and common inline secret assignments in title/description are redacted. Provider token usage is recorded only when the provider returns it; secrets and clients are never placed in graph state or persisted snapshots.
+
+### Investigation API
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/v1/investigations` | Run investigation for an existing incident; synchronous, returns 201 after completion |
+| GET | `/api/v1/investigations/{investigation_id}` | Get persisted status and timestamps |
+| GET | `/api/v1/investigations/{investigation_id}/report` | Get completed structured report |
+| GET | `/api/v1/investigations/{investigation_id}/evidence` | Get observation and knowledge evidence records |
+| GET | `/api/v1/investigations/{investigation_id}/timeline` | Get the persisted node timeline |
+| POST | `/api/v1/investigations/{investigation_id}/cancel` | Request cooperative cancellation if currently running (202); otherwise 409 |
+
+Example:
+
+```powershell
+$body = @{ incident_id = "inc-..."; use_llm = $false } | ConvertTo-Json
+$run = Invoke-RestMethod http://127.0.0.1:8000/api/v1/investigations -Method Post -ContentType "application/json" -Body $body
+Invoke-RestMethod "http://127.0.0.1:8000/api/v1/investigations/$($run.investigation_id)/report"
+Invoke-RestMethod "http://127.0.0.1:8000/api/v1/investigations/$($run.investigation_id)/evidence"
+```
+
+Reports include an executive summary, incident context, affected services, timeline, simulator health/metrics/logs, retrieved knowledge citations, hypotheses with support/contradiction IDs, confidence assessment, missing evidence, recommendations, safety warnings, and simulator limitations. Every current infrastructure fact points to an observation ID. Knowledge references cite the exact retrieved document and chunk.
+
+### Persistence and evaluation
+
+Alembic revision `0002_investigation_storage` adds `investigations` and `investigation_timeline` tables to the existing SQLite database. JSON snapshots persist the latest graph state, report, and evidence; timeline entries are separate rows. They share the existing `/app/data/incidents.db` named Docker volume. On startup, unfinished `RUNNING` records are marked failed with an interruption timeline event so clients do not poll forever after a process restart. No Redis, database server, or new volume is introduced.
+
+The deterministic benchmark is in `src/incident_agent/evaluation/investigation_scenarios.json` and contains 31 labeled cases across all four services, including incomplete/conflicting alerts and hostile incident/log/reference text. Run it with:
+
+```powershell
+uv run python -m incident_agent.evaluation.investigation
+```
+
+It reports completion, root-cause identification, evidence precision, citation correctness, unsupported-claim rate, read-only tool selection, unsafe tool attempts, step count, latency, and available token usage. It uses the local hash retriever and no LLM calls. Model-assisted evaluation is separate and must be run explicitly against a configured provider; no model-based scores are implied by the deterministic benchmark.
+
 ## Versioned infrastructure API
 
 FastAPI routes live in `incident_agent.api.routes`; Pydantic response schemas are in `incident_agent.api.schemas`. The application creates one `InfrastructureManager` for its lifecycle and provides it to route handlers through a dependency. Inspection endpoints do not mutate simulator state. The existing incident investigation, simulator telemetry, and reset routes remain available for compatibility; simulator reset is a state-changing development operation. There are no new remediation routes.

@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Response
 from incident_agent.agent.graph import IncidentAgent
 from incident_agent.api.routes import router as infrastructure_router
 from incident_agent.api.incident_routes import router as incident_router
+from incident_agent.api.investigation_routes import router as investigation_router
 from incident_agent.api.middleware import IncidentPayloadLimitMiddleware
 from incident_agent.api.retrieval_routes import router as retrieval_router
 from incident_agent.api.schemas import HealthResponse
@@ -15,6 +16,8 @@ from incident_agent.simulator.environment import LocalInfrastructure
 from incident_agent.incidents.registry import IncidentRegistry
 from incident_agent.storage.database import DEFAULT_DATABASE_URL, Database
 from incident_agent.retrieval.engine import HybridRetriever, RetrievalEngine
+from incident_agent.agent.investigation.service import InvestigationService
+from incident_agent.storage.investigation_repository import InvestigationRepository
 
 
 def create_app(
@@ -31,6 +34,7 @@ def create_app(
     async def lifespan(_: FastAPI):
         try:
             database.initialize()
+            application.state.investigation_repository.mark_interrupted()
             retrieval.initialize()
             yield
         finally:
@@ -49,9 +53,15 @@ def create_app(
     application.state.retrieval_engine = retrieval
     application.state.agent = IncidentAgent(infrastructure=manager, retriever=HybridRetriever(retrieval))
     application.state.incident_registry = IncidentRegistry(manager, database=database)
+    application.state.investigation_repository = InvestigationRepository(database)
+    application.state.investigation_service = InvestigationService(
+        application.state.incident_registry, manager, retrieval,
+        application.state.investigation_repository,
+    )
     application.include_router(infrastructure_router)
     application.include_router(incident_router)
     application.include_router(retrieval_router)
+    application.include_router(investigation_router)
 
     @application.get("/health", response_model=HealthResponse, tags=["Health"])
     def health(response: Response) -> HealthResponse:

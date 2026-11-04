@@ -290,6 +290,10 @@ class RetrievalEngine:
     @_serialized
     def close(self) -> None:
         """Drop direct Chroma references; its persisted data remains untouched."""
+        client = self._client
+        close_client = getattr(client, "close", None)
+        if callable(close_client):
+            close_client()
         self._client = None
         self._vector_collection = None
         self._initialized = False
